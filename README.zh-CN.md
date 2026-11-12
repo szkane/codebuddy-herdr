@@ -272,13 +272,14 @@ codebuddy plugin validate ./herdr-notify   # 插件清单
 │   └── package.json
 ├── test/                  node:test 测试
 ├── examples/              App programs.json + Core 模板
+├── AGENTS.md              编码代理的项目约定
 ├── CHANGELOG.md
 ├── README.md
 ├── README.zh-CN.md
 └── LICENSE
 ```
 
-插件没有构建步骤。`index.js` 是普通 CommonJS，由 Hook 运行器直接执行。
+插件没有构建步骤。`index.js` 是普通 CommonJS，由 Hook 运行器直接执行。面向编码代理的项目约定在 [AGENTS.md](AGENTS.md)。
 
 ## 许可证
 

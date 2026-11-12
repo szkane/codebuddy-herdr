@@ -272,13 +272,14 @@ Layout:
 │   └── package.json
 ├── test/                  node:test suite
 ├── examples/              App programs.json + core template
+├── AGENTS.md              Instructions for coding agents
 ├── CHANGELOG.md
 ├── README.md
 ├── README.zh-CN.md
 └── LICENSE
 ```
 
-The plugin has no build step. `index.js` is plain CommonJS and is executed directly by the hook runner.
+The plugin has no build step. `index.js` is plain CommonJS and is executed directly by the hook runner. Project-specific instructions for coding agents live in [AGENTS.md](AGENTS.md).
 
 ## License
 
