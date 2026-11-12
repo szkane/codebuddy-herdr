@@ -66,7 +66,7 @@ test('maps CodeBuddy lifecycle events to Herdr states', () => {
     [{ hook_event_name: 'ElicitationResult', session_id: 's1' }, 'working', 'input received'],
     [{ hook_event_name: 'SubagentStart', session_id: 's1' }, 'working', 'subagent running'],
     [{ hook_event_name: 'Stop', session_id: 's1' }, 'done', 'turn complete'],
-    [{ hook_event_name: 'StopFailure', session_id: 's1' }, 'error', 'turn failed'],
+    [{ hook_event_name: 'StopFailure', session_id: 's1' }, 'blocked', 'turn failed'],
     [{ hook_event_name: 'SessionEnd', session_id: 's1', reason: 'other' }, 'clear', null],
     [{ hook_event_name: 'SessionEnd', session_id: 's1', reason: 'clear' }, 'idle', 'ready']
   ];
@@ -154,8 +154,29 @@ test('uses the TUI CLI and maps done to idle', { skip: process.platform === 'win
   assert.match(calls[0], /^pane report-agent w1:p1 /);
   assert.match(calls[0], /--state idle/);
   assert.match(calls[0], /--message turn complete/);
+  assert.match(calls[0], /--agent-session-id tui -- codebuddy --resume tui/);
   assert.match(calls[1], /^pane release-agent w1:p1 /);
+  assert.doesNotMatch(calls[1], /--agent-session-id/);
   assert.equal(fs.existsSync(box.tty), false, 'CLI success must not also write OSC');
+});
+
+test('omits resume args when the session id is not a safe command word', { skip: process.platform === 'win32' }, () => {
+  const box = sandbox();
+  const bin = path.join(box.dir, 'herdr');
+  const cliLog = path.join(box.dir, 'cli.log');
+  fs.writeFileSync(bin, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HERDR_CLI_LOG"\nexit 0\n');
+  fs.chmodSync(bin, 0o755);
+
+  run({ hook_event_name: 'Stop', session_id: 'bad id with spaces' }, box, {
+    HERDR_ENV: '1',
+    HERDR_BIN_PATH: bin,
+    HERDR_PANE_ID: 'w1:p1',
+    HERDR_CLI_LOG: cliLog
+  });
+
+  const call = fs.readFileSync(cliLog, 'utf8').trim();
+  assert.match(call, /^pane report-agent w1:p1 /);
+  assert.doesNotMatch(call, /--agent-session-id/);
 });
 
 test('never calls the app binary (hc) for reporting', { skip: process.platform === 'win32' }, () => {

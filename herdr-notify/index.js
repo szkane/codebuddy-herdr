@@ -135,7 +135,10 @@ function mapEvent(name, input, previousState) {
       return { state: 'done', msg: 'turn complete' };
 
     case 'StopFailure':
-      return { state: 'error', msg: 'turn failed' };
+      // Herdr's app only renders working/blocked/done/idle; an OSC 'error'
+      // becomes an invisible dim dot. A failed turn needs the person, so
+      // surface it as blocked instead.
+      return { state: 'blocked', msg: 'turn failed' };
 
     case 'SessionEnd':
       // /clear immediately starts a new session; keep the pane rather than
@@ -231,7 +234,12 @@ function canUseCli() {
   return path.basename(bin) !== 'hc';
 }
 
-function cliReport(record, seq) {
+const RESUME_COMMAND = 'codebuddy';
+// CodeBuddy's --session-id accepts letters, digits, hyphens, underscores and
+// colons, and must start with a letter or digit.
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/;
+
+function cliReport(record, seq, sessionId) {
   const bin = herdrBin();
   const pane = process.env.HERDR_PANE_ID || '';
   if (!bin || !pane) return { ok: false, error: 'missing HERDR_BIN_PATH/HERDR_PANE_ID' };
@@ -245,6 +253,12 @@ function cliReport(record, seq) {
     const state = record.state === 'done' || record.state === 'error' ? 'idle' : record.state;
     args = ['pane', 'report-agent', pane, '--source', SOURCE, '--agent', AGENT, '--state', state, '--seq', String(seq)];
     if (record.msg) args.push('--message', record.msg);
+    // Native resume: after a Herdr server restart the pane reopens in the
+    // same directory and runs this command. The first word must be a plain
+    // command on PATH, and the id must be free of apostrophes/control chars.
+    if (sessionId && SESSION_ID_RE.test(sessionId)) {
+      args.push('--agent-session-id', sessionId, '--', RESUME_COMMAND, '--resume', sessionId);
+    }
   }
 
   const result = spawnSync(bin, args, { stdio: 'ignore', timeout: 1500 });
@@ -255,6 +269,7 @@ function cliReport(record, seq) {
 const input = readInput();
 const event = input.hook_event_name || '';
 const key = sessionKey(input);
+const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
 const previous = DRY_RUN ? { seq: 0, state: null } : readState(key);
 const record = mapEvent(event, input, previous.state);
 
@@ -287,7 +302,7 @@ let mode = 'none';
 let detail = '';
 
 if (canUseCli()) {
-  const cli = cliReport(record, seq);
+  const cli = cliReport(record, seq, sessionId);
   if (cli.ok) {
     delivered = true;
     mode = 'cli';
