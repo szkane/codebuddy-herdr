@@ -1,6 +1,6 @@
 {
   "name": "herdr-notify",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Report CodeBuddy Code session state to the Herdr app (OSC 7501) and Herdr TUI (pane report-agent).",
   "author": {
     "name": "szkane",

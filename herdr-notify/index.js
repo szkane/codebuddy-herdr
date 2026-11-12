@@ -11,7 +11,7 @@
  *      Over SSH the sequence simply travels with the rest of the terminal bytes,
  *      so this also works when CodeBuddy runs on a remote Linux box.
  *   2. Herdr TUI: speaks the socket API through 'herdr pane report-agent'.
- *      We use it when HERDR_ENV=1 points at a TUI binary.
+ *      We use it when HERDR_ENV=1 points at the TUI binary.
  *
  * The hook's stdout belongs to CodeBuddy, so OSC is written to /dev/tty, never
  * to stdout. Anything unexpected is swallowed: a status reporter must never
@@ -21,36 +21,108 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const APP = 'codebuddy';
 const LABEL = 'CodeBuddy';
 const SOURCE = 'codebuddy';
 const AGENT = 'CodeBuddy';
+const RESUME_COMMAND = 'codebuddy';
 
-const STATE_DIR = path.join(os.tmpdir(), 'herdr-notify');
+// CodeBuddy's --session-id accepts letters, digits, hyphens, underscores and
+// colons, and must start with a letter or digit.
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/;
+// Herdr pane addresses look like w1:p1 or machine/t7; reject option-like values.
+const PANE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:/_-]{0,127}$/;
+
+const MAX_INPUT = 1024 * 1024;
+const MAX_STATE = 4096;
+
 const DEBUG_LOG = process.env.HERDR_NOTIFY_DEBUG || '';
-// Overridable so tests and troubleshooting can capture the exact bytes.
-const TTY_DEVICE = process.env.HERDR_NOTIFY_TTY || '/dev/tty';
 const DRY_RUN = process.argv.indexOf('--dry-run') !== -1;
+const O_NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+const O_NONBLOCK = fs.constants.O_NONBLOCK || 0;
+
+function stateBase() {
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  if (runtime && path.isAbsolute(runtime)) return path.join(runtime, 'herdr-notify');
+  let id = 'user';
+  if (typeof process.getuid === 'function') {
+    id = String(process.getuid());
+  } else {
+    try {
+      id = os.userInfo().username.replace(/[^A-Za-z0-9_-]/g, '_');
+    } catch (_) {}
+  }
+  return path.join(os.tmpdir(), 'herdr-notify-' + id);
+}
+
+const STATE_DIR = stateBase();
 
 function debug(record) {
   if (!DEBUG_LOG) return;
   try {
-    fs.mkdirSync(path.dirname(DEBUG_LOG), { recursive: true });
-    fs.appendFileSync(
-      DEBUG_LOG,
-      JSON.stringify(Object.assign({ ts: new Date().toISOString() }, record)) + '\n'
-    );
+    fs.mkdirSync(path.dirname(DEBUG_LOG), { recursive: true, mode: 0o700 });
+    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | O_NOFOLLOW;
+    const fd = fs.openSync(DEBUG_LOG, flags, 0o600);
+    try {
+      try { fs.fchmodSync(fd, 0o600); } catch (_) {}
+      fs.writeSync(fd, JSON.stringify(Object.assign({ ts: new Date().toISOString() }, record)) + '\n');
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch (_) {}
+}
+
+// A status reporter must never fail a turn, even on an unexpected throw.
+process.on('uncaughtException', function (err) {
+  try { debug({ fatal: String(err) }); } catch (_) {}
+  process.exit(0);
+});
+
+function parseLoose(raw) {
+  const grab = function (key) {
+    const match = new RegExp('"' + key + '"\\\s*:\\\s*"([^"]*)"').exec(raw);
+    return match ? match[1] : undefined;
+  };
+  const out = {};
+  ['hook_event_name', 'session_id', 'tool_name', 'notification_type'].forEach(function (key) {
+    const value = grab(key);
+    if (value !== undefined) out[key] = value;
+  });
+  return out;
 }
 
 function readInput() {
   try {
-    const raw = fs.readFileSync(0, 'utf8');
+    const chunks = [];
+    let total = 0;
+    let truncated = false;
+    const buf = Buffer.alloc(65536);
+    while (true) {
+      const n = fs.readSync(0, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      if (total + n > MAX_INPUT) {
+        chunks.push(Buffer.from(buf.subarray(0, MAX_INPUT - total)));
+        total = MAX_INPUT;
+        truncated = true;
+        break;
+      }
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+      total += n;
+    }
+    const raw = Buffer.concat(chunks).toString('utf8');
     if (!raw.trim()) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (err) {
+      if (!truncated) return { __error: String(err) };
+      const loose = parseLoose(raw);
+      loose.__truncated = true;
+      return loose;
+    }
   } catch (err) {
     return { __error: String(err) };
   }
@@ -59,7 +131,14 @@ function readInput() {
 function oneLine(value, max) {
   let s = String(value === undefined || value === null ? '' : value);
   s = s.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
-  if (max && s.length > max) s = s.slice(0, max - 1) + '…';
+  if (max) {
+    // Cap the prefix before building an array, so a huge path cannot allocate
+    // one entry per code unit just to be truncated.
+    const limit = max * 4;
+    if (s.length > limit) s = s.slice(0, limit);
+    const chars = Array.from(s);
+    if (chars.length > max) s = chars.slice(0, max - 1).join('') + '…';
+  }
   return s;
 }
 
@@ -88,7 +167,8 @@ function mapEvent(name, input, previousState) {
       return { state: 'idle', msg: 'ready' };
 
     case 'UserPromptSubmit':
-      return { state: 'working', msg: oneLine(input.prompt, 72) || 'working' };
+      // Never copy the prompt: it is the most likely carrier of secrets.
+      return { state: 'working', msg: 'working' };
 
     case 'PreToolUse':
       // These two tools stop and wait for the person, so the pane blocks
@@ -126,7 +206,8 @@ function mapEvent(name, input, previousState) {
       return { state: 'working', msg: 'subagent running' };
 
     case 'Elicitation':
-      return { state: 'blocked', kind: 'question', msg: oneLine(input.message, 72) || 'waiting for input' };
+      // Do not copy MCP-provided text; it may contain user data or secrets.
+      return { state: 'blocked', kind: 'question', msg: 'waiting for input' };
 
     case 'ElicitationResult':
       return { state: 'working', msg: 'input received' };
@@ -141,9 +222,8 @@ function mapEvent(name, input, previousState) {
       return { state: 'blocked', msg: 'turn failed' };
 
     case 'SessionEnd':
-      // /clear immediately starts a new session; keep the pane rather than
-      // releasing it and flashing the agent out of the sidebar.
-      if (input.reason === 'clear') return { state: 'idle', msg: 'ready' };
+      // /clear should also drop the TUI resume command; the next SessionStart
+      // (source=clear) re-adds the agent with the new session id.
       return { state: 'clear' };
 
     default:
@@ -152,33 +232,56 @@ function mapEvent(name, input, previousState) {
 }
 
 function sessionKey(input) {
-  const raw = typeof input.session_id === 'string' ? input.session_id : 'default';
-  const clean = raw.replace(/[^A-Za-z0-9_-]/g, '');
-  return clean.slice(0, 16) || 'default';
+  const raw = typeof input.session_id === 'string' && input.session_id ? input.session_id : 'default';
+  // Hash the full id so two sessions cannot collide in one state file.
+  return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32);
 }
 
-/*
- * Herdr drops reports whose --seq is not greater than the last accepted one,
- * so keep a monotonic counter per session even when two hooks fire in the
- * same millisecond.
- */
+function ensureStateDir() {
+  fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  const st = fs.lstatSync(STATE_DIR);
+  if (!st.isDirectory() || st.isSymbolicLink()) throw new Error('unsafe state dir');
+  if (typeof process.getuid === 'function') {
+    if (st.uid !== process.getuid()) throw new Error('state dir owner mismatch');
+    if ((st.mode & 0o077) !== 0) fs.chmodSync(STATE_DIR, 0o700);
+  }
+}
+
 function stateFile(key) {
   return path.join(STATE_DIR, key + '.json');
 }
 
 function readState(key) {
   try {
-    const raw = fs.readFileSync(stateFile(key), 'utf8').trim();
-    if (!raw) return { seq: 0, state: null };
-    if (raw.charAt(0) === '{') {
-      const parsed = JSON.parse(raw);
-      return {
-        seq: Number(parsed.seq) || 0,
-        state: typeof parsed.state === 'string' ? parsed.state : null
-      };
+    ensureStateDir();
+    const file = stateFile(key);
+    let lst;
+    try {
+      lst = fs.lstatSync(file);
+    } catch (_) {
+      return { seq: 0, state: null };
     }
-    // Legacy: the first build stored a bare sequence number.
-    return { seq: Number(raw) || 0, state: null };
+    if (lst.isSymbolicLink() || !lst.isFile() || lst.size > MAX_STATE) {
+      return { seq: 0, state: null };
+    }
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | O_NOFOLLOW);
+    try {
+      const st = fs.fstatSync(fd);
+      if (st.size > MAX_STATE) return { seq: 0, state: null };
+      const raw = fs.readFileSync(fd, 'utf8').trim();
+      if (!raw) return { seq: 0, state: null };
+      if (raw.charAt(0) === '{') {
+        const parsed = JSON.parse(raw);
+        return {
+          seq: Number(parsed.seq) || 0,
+          state: typeof parsed.state === 'string' ? parsed.state : null
+        };
+      }
+      // Legacy: the first build stored a bare sequence number.
+      return { seq: Number(raw) || 0, state: null };
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch (_) {
     return { seq: 0, state: null };
   }
@@ -186,16 +289,80 @@ function readState(key) {
 
 function writeState(key, seq, state) {
   try {
-    fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(stateFile(key), JSON.stringify({ seq: seq, state: state }));
-  } catch (_) {}
+    ensureStateDir();
+    const file = stateFile(key);
+    const tmp = path.join(
+      STATE_DIR,
+      key + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp'
+    );
+    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | O_NOFOLLOW;
+    const fd = fs.openSync(tmp, flags, 0o600);
+    try {
+      fs.writeSync(fd, JSON.stringify({ seq: seq, state: state }));
+    } finally {
+      fs.closeSync(fd);
+    }
+    try {
+      // rename replaces a symlink at the destination instead of following it.
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      throw err;
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function withStateLock(key, fn) {
+  try {
+    ensureStateDir();
+  } catch (_) {
+    return fn();
+  }
+  const lock = path.join(STATE_DIR, key + '.lock');
+  const deadline = Date.now() + 100;
+  while (true) {
+    let fd = -1;
+    try {
+      fd = fs.openSync(
+        lock,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | O_NOFOLLOW,
+        0o600
+      );
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      fd = -1;
+      try {
+        return fn();
+      } finally {
+        try { fs.unlinkSync(lock); } catch (_) {}
+      }
+    } catch (err) {
+      if (fd >= 0) {
+        try { fs.closeSync(fd); } catch (_) {}
+      }
+      if (err.code !== 'EEXIST') return fn();
+      try {
+        const st = fs.statSync(lock);
+        if (Date.now() - st.mtimeMs > 2000) {
+          try { fs.unlinkSync(lock); } catch (_) {}
+          continue;
+        }
+      } catch (_) {}
+      if (Date.now() >= deadline) return fn();
+      const until = Date.now() + 2;
+      while (Date.now() < until) {}
+    }
+  }
 }
 
 function base64(value) {
   return Buffer.from(String(value), 'utf8').toString('base64');
 }
 
-function oscPayload(record, key) {
+function oscPayload(record) {
   const parts = ['state=' + record.state];
   if (record.kind) parts.push('kind=' + record.kind);
   // Every report replaces the whole record, so app/title are repeated.
@@ -207,10 +374,31 @@ function oscPayload(record, key) {
   return '\u001b]7501;' + parts.join(':') + '\u001b\\';
 }
 
+function ttyAllowed(device) {
+  const resolved = path.resolve(device);
+  const tmpRoot = path.resolve(os.tmpdir()) + path.sep;
+  try {
+    const st = fs.lstatSync(device);
+    if (st.isSymbolicLink()) return false;
+    if (st.isCharacterDevice()) return true;
+    if (st.isFile()) return resolved.startsWith(tmpRoot);
+    return false;
+  } catch (err) {
+    // Tests create a plain file under the system temp directory.
+    if (err.code === 'ENOENT') return resolved.startsWith(tmpRoot);
+    return false;
+  }
+}
+
 function writeToTerminal(payload) {
+  const device = process.env.HERDR_NOTIFY_TTY || '/dev/tty';
+  if (!ttyAllowed(device)) {
+    return { ok: false, error: 'refusing unsafe tty path: ' + device };
+  }
   let fd = -1;
   try {
-    fd = fs.openSync(TTY_DEVICE, 'w');
+    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | O_NOFOLLOW | O_NONBLOCK;
+    fd = fs.openSync(device, flags, 0o600);
     fs.writeSync(fd, payload);
     fs.closeSync(fd);
     return { ok: true };
@@ -229,28 +417,32 @@ function herdrBin() {
 function canUseCli() {
   const bin = herdrBin();
   if (process.env.HERDR_ENV !== '1' || !bin || !process.env.HERDR_PANE_ID) return false;
-  // The Herdr app's core binary (hc 0.1.x) has no 'pane report-agent'; the app
-  // consumes OSC 7501 instead. The TUI binary is 'herdr'.
-  return path.basename(bin) !== 'hc';
+  // The app's core binary is hc; only the TUI binary is herdr.
+  if (!/^herdr(\.exe)?$/i.test(path.basename(bin))) return false;
+  try {
+    const st = fs.statSync(bin);
+    if (!st.isFile()) return false;
+    fs.accessSync(bin, fs.constants.X_OK);
+  } catch (_) {
+    return false;
+  }
+  return true;
 }
-
-const RESUME_COMMAND = 'codebuddy';
-// CodeBuddy's --session-id accepts letters, digits, hyphens, underscores and
-// colons, and must start with a letter or digit.
-const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/;
 
 function cliReport(record, seq, sessionId) {
   const bin = herdrBin();
   const pane = process.env.HERDR_PANE_ID || '';
-  if (!bin || !pane) return { ok: false, error: 'missing HERDR_BIN_PATH/HERDR_PANE_ID' };
+  if (!bin || !pane || !PANE_ID_RE.test(pane)) {
+    return { ok: false, error: 'invalid HERDR_BIN_PATH/HERDR_PANE_ID' };
+  }
 
   let args;
   if (record.state === 'clear') {
     args = ['pane', 'release-agent', pane, '--source', SOURCE, '--agent', AGENT, '--seq', String(seq)];
   } else {
     // The TUI accepts idle/working/blocked. 'done' is inferred from a
-    // working -> idle transition, and error has no CLI equivalent.
-    const state = record.state === 'done' || record.state === 'error' ? 'idle' : record.state;
+    // working -> idle transition.
+    const state = record.state === 'done' ? 'idle' : record.state;
     args = ['pane', 'report-agent', pane, '--source', SOURCE, '--agent', AGENT, '--state', state, '--seq', String(seq)];
     if (record.msg) args.push('--message', record.msg);
     // Native resume: after a Herdr server restart the pane reopens in the
@@ -270,26 +462,55 @@ const input = readInput();
 const event = input.hook_event_name || '';
 const key = sessionKey(input);
 const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-const previous = DRY_RUN ? { seq: 0, state: null } : readState(key);
-const record = mapEvent(event, input, previous.state);
+
+let record = null;
+let previous = { seq: 0, state: null };
+let seq = Date.now();
+
+if (DRY_RUN) {
+  record = mapEvent(event, input, null);
+} else {
+  const snapshot = withStateLock(key, function () {
+    const prev = readState(key);
+    const rec = mapEvent(event, input, prev.state);
+    if (!rec) return { prev: prev, record: null, seq: 0 };
+    // A per-session lock plus previous+1 keeps seq strictly increasing even
+    // when several tool hooks fire in the same millisecond.
+    const next = Math.max(Date.now(), prev.seq + 1);
+    writeState(key, next, rec.state === 'clear' ? null : rec.state);
+    return { prev: prev, record: rec, seq: next };
+  });
+  previous = snapshot.prev;
+  record = snapshot.record;
+  seq = snapshot.seq || Date.now();
+}
 
 if (!record) {
-  debug({ event: event, session: key, skipped: true, previous: previous.state, reason: input.__error ? 'bad input: ' + input.__error : 'no state change' });
+  debug({
+    event: event,
+    session: key,
+    skipped: true,
+    previous: previous.state,
+    truncated: !!input.__truncated,
+    reason: input.__error ? 'bad input: ' + input.__error : 'no state change'
+  });
   process.exit(0);
 }
 
-// Millisecond precision plus the pid keeps parallel tool hooks from producing
-// the same seq; Herdr drops anything not strictly increasing.
-const seq = DRY_RUN
-  ? Date.now()
-  : Math.max(Date.now() * 1000 + (process.pid % 1000), previous.seq + 1);
-if (!DRY_RUN) writeState(key, seq, record.state === 'clear' ? null : record.state);
-const payload = oscPayload(record, key);
+const payload = oscPayload(record);
 
 if (DRY_RUN) {
   process.stdout.write(
     JSON.stringify(
-      { event: event, session: key, record: record, seq: seq, osc: payload, cli: canUseCli() },
+      {
+        event: event,
+        session: key,
+        previous: previous.state,
+        record: record,
+        seq: seq,
+        osc: payload,
+        cli: canUseCli()
+      },
       null,
       2
     ) + '\n'
@@ -318,5 +539,14 @@ if (!delivered) {
   if (!tty.ok) detail = detail ? detail + '; ' + tty.error : tty.error;
 }
 
-debug({ event: event, session: key, record: record, seq: seq, mode: mode, delivered: delivered, detail: detail });
+debug({
+  event: event,
+  session: key,
+  record: record,
+  seq: seq,
+  mode: mode,
+  delivered: delivered,
+  truncated: !!input.__truncated,
+  detail: detail
+});
 process.exit(0);

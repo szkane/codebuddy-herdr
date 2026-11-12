@@ -5,13 +5,13 @@
     "url": "https://github.com/szkane"
   },
   "description": "CodeBuddy Code plugins for Herdr",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "plugins": [
     {
       "name": "herdr-notify",
       "source": "./herdr-notify",
       "description": "Report CodeBuddy Code session state to the Herdr app (OSC 7501) and Herdr TUI (pane report-agent).",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "szkane",
         "url": "https://github.com/szkane"
