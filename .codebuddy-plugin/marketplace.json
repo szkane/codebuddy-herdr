@@ -1,0 +1,31 @@
+{
+  "name": "codebuddy-herdr",
+  "owner": {
+    "name": "szkane",
+    "url": "https://github.com/szkane"
+  },
+  "description": "CodeBuddy Code plugins for Herdr",
+  "version": "0.2.0",
+  "plugins": [
+    {
+      "name": "herdr-notify",
+      "source": "./herdr-notify",
+      "description": "Report CodeBuddy Code session state to the Herdr app (OSC 7501) and Herdr TUI (pane report-agent).",
+      "version": "0.2.0",
+      "author": {
+        "name": "szkane",
+        "url": "https://github.com/szkane"
+      },
+      "homepage": "https://github.com/szkane/codebuddy-herdr",
+      "repository": "https://github.com/szkane/codebuddy-herdr",
+      "license": "MIT",
+      "keywords": [
+        "codebuddy",
+        "herdr",
+        "osc-7501",
+        "agent-status"
+      ],
+      "category": "integrations"
+    }
+  ]
+}

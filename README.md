@@ -21,7 +21,7 @@ The OSC path matters for remote work: terminal escape sequences travel with the 
 
 - Reports `working` while a turn runs, `blocked` while CodeBuddy waits for permission or an answer, `done` when the turn ends, and `error` when it fails.
 - Works with the Herdr app over SSH, and with remote machines managed by `herdr machine add`.
-- Uses the Herdr TUI socket API when running inside the TUI.
+- Uses the Herdr TUI socket API when running inside the TUI, including native session resume.
 - No daemon, no runtime dependencies, no network calls.
 - Hooks always exit 0. A reporting failure can never block an agent turn.
 - Keeps shell commands and URLs out of the status message.
@@ -34,27 +34,64 @@ The OSC path matters for remote work: terminal escape sequences travel with the 
 
 ## Install
 
+### From the plugin marketplace (recommended)
+
+Add the marketplace once:
+
+```text
+/plugin marketplace add szkane/codebuddy-herdr
+```
+
+Then install the plugin:
+
+```text
+/plugin install herdr-notify@codebuddy-herdr
+```
+
+Or do both from the shell:
+
 ```bash
-git clone https://github.com/szkane/codebuddy-herdr.git
-cd codebuddy-herdr
-codebuddy plugin add ./herdr-notify --scope user -y
+codebuddy plugin marketplace add szkane/codebuddy-herdr
+codebuddy plugin install herdr-notify@codebuddy-herdr --scope user
 ```
 
 Start a new CodeBuddy session, or run `/reload-plugins` in the current one.
 
-For development, load the working tree without installing:
+You can also run `/plugin`, open **Discover**, select **herdr-notify**, and choose an install scope.
+
+Update later:
 
 ```bash
-codebuddy --plugin-dir ./herdr-notify
+codebuddy plugin marketplace update codebuddy-herdr
+codebuddy plugin update herdr-notify@codebuddy-herdr
 ```
 
-Verify the plugin is enabled:
+### From a local checkout
+
+For plugin development:
+
+```bash
+git clone https://github.com/szkane/codebuddy-herdr.git
+codebuddy --plugin-dir ./codebuddy-herdr/herdr-notify
+```
+
+Or install the checkout as a local marketplace:
+
+```bash
+cd codebuddy-herdr
+codebuddy plugin marketplace add .
+codebuddy plugin install herdr-notify@codebuddy-herdr --scope user
+```
+
+### Verify
 
 ```bash
 codebuddy plugin list | grep herdr
 ```
 
-> Some CodeBuddy builds fail to enable a local package with `codebuddy plugin enable` and report `Marketplace undefined is not found`. In that case, add `"herdr-notify@local-<id>": true` to `enabledPlugins` in `~/.codebuddy/settings.json`, using the id shown by `codebuddy plugin list`.
+> If you previously loaded this repository with `--plugin-dir` or installed it as a local package, uninstall that copy before installing from the marketplace. Two enabled copies would report the same pane twice.
+
+> If `codebuddy plugin enable` reports `Marketplace undefined is not found` for a local package, add `"herdr-notify@local-<id>": true` to `enabledPlugins` in `~/.codebuddy/settings.json`, using the id shown by `codebuddy plugin list`.
 
 ## Usage
 
@@ -118,6 +155,18 @@ The app watches `programs.json` and reloads it on change. If the entry still doe
 
 The built-in list lives in `defaults/programs.json` in [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app). Adding CodeBuddy there is a one-entry upstream change; the local file works today.
 
+### TUI automation with templates
+
+Herdr Core can start a template and send the task as its first message once the plugin reports the agent ready. Install the optional template:
+
+```bash
+mkdir -p ~/.config/herdr-core/templates
+cp examples/herdr-core-templates/codebuddy.md ~/.config/herdr-core/templates/
+hc run codebuddy "fix the failing test"
+```
+
+The template uses `ready: report`, so the task is sent only after this plugin reports CodeBuddy's first state. The app menu uses `programs.json` instead; the template is for `hc run` and TUI scripts.
+
 ## State mapping
 
 | CodeBuddy event | Herdr state | Notes |
@@ -133,7 +182,7 @@ The built-in list lives in `defaults/programs.json` in [herdrdev/herdr-app](http
 | `ElicitationResult` | `working` | Input received |
 | `SubagentStart` | `working` | A subagent is running |
 | `Stop` | `done` | The turn completed |
-| `StopFailure` | `error` | The turn ended with an API error |
+| `StopFailure` | `blocked` | A failed turn needs you; the app has no `error` visual |
 | `SessionEnd` | `clear` | `/clear` maps to `idle` |
 
 ## Design notes
@@ -142,6 +191,7 @@ The built-in list lives in `defaults/programs.json` in [herdrdev/herdr-app](http
 - **Write to `/dev/tty`, not stdout.** CodeBuddy captures hook stdout, so the sequence must go to the terminal device.
 - **`PermissionRequest` is not used.** It also fires for tools that are auto-approved, so it cannot distinguish "waiting for a person" from "about to run". `Notification(permission_prompt)` is the reliable signal.
 - **`done` survives.** Per the OSC 7501 specification, `done` and `error` persist until they are replaced or cleared. A late `idle_prompt` only resets a pane that is still `working`, which recovers interrupted turns.
+- **Native resume (TUI).** Each CLI report includes `--agent-session-id <session> -- codebuddy --resume <session>`, so a Herdr TUI server restart reopens the same conversation. The Herdr app's `hc` 0.1.x has no public session-reporting API, so app-side resume needs upstream support.
 - **Monotonic `seq`.** Herdr drops reports whose sequence is not strictly increasing. The plugin keeps a per-session counter under the system temp directory.
 
 ## Configuration
@@ -182,9 +232,19 @@ The built-in list lives in `defaults/programs.json` in [herdrdev/herdr-app](http
 
 - Only Herdr consumes OSC 7501. iTerm2, Terminal.app and other terminals ignore it, which is expected.
 - `tmux` blocks the sequence. Run CodeBuddy directly in a Herdr pane.
-- The TUI has no `error` state. `StopFailure` is reported as `idle` with the message `turn failed`.
-- `done` and `error` records persist until the next report or `clear`, by design.
+- `StopFailure` is reported as `blocked` with the message `turn failed`; the app has no separate `error` visual.
+- `done` records persist until the next report or `clear`, by design.
 - Hooks always exit 0. Delivery failures are written to the debug log only.
+
+## Upstream parity
+
+These pieces still require changes in Herdr itself:
+
+- **App-side native resume.** The Herdr app's `hc` 0.1.x has no public session-reporting API, and `programs.json` has no resume field.
+- **Built-in Start an agent entry.** The app reads `defaults/programs.json`; CodeBuddy is not in that table yet. The local `programs.json` entry works today.
+- **`herdr agent start --kind codebuddy`.** The core's kind list is fixed; a detection manifest plus a kind entry would be needed.
+
+The plugin covers the rest today: state, blocked detection, notifications, waits, the app menu via `programs.json`, TUI resume, and `hc run` templates.
 
 ## Development
 
@@ -192,15 +252,18 @@ The built-in list lives in `defaults/programs.json` in [herdrdev/herdr-app](http
 git clone https://github.com/szkane/codebuddy-herdr.git
 cd codebuddy-herdr
 
-node --test                              # lifecycle, framing and transport tests
+node --test                                # lifecycle, framing and transport tests
 node herdr-notify/index.js --dry-run < payload.json
-codebuddy plugin validate ./herdr-notify
+codebuddy plugin validate .                # marketplace manifest
+codebuddy plugin validate ./herdr-notify   # plugin manifest
 ```
 
 Layout:
 
 ```text
 .
+├── .codebuddy-plugin/
+│   └── marketplace.json   Marketplace manifest
 ├── herdr-notify/          CodeBuddy plugin
 │   ├── .codebuddy-plugin/plugin.json
 │   ├── hooks/hooks.json
@@ -208,7 +271,8 @@ Layout:
 │   ├── scripts/notify.sh
 │   └── package.json
 ├── test/                  node:test suite
-├── examples/              Herdr app programs.json example
+├── examples/              App programs.json + core template
+├── CHANGELOG.md
 ├── README.md
 ├── README.zh-CN.md
 └── LICENSE
