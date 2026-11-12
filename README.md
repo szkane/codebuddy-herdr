@@ -82,6 +82,42 @@ Run `codebuddy` in a remote pane. Panes owned by `herdr-core` use the OSC path. 
 
 The escape sequences are ignored by ordinary terminals. Nothing breaks, but no status is shown.
 
+### Start CodeBuddy from the Herdr app menu
+
+The app's **Start an agent** menu is built from `programs.json` entries that have a `run` command. CodeBuddy is not in the built-in table, so it does not appear until you add an entry.
+
+On the machine running the Herdr app (your Mac), edit `~/.config/herdr-app/programs.json`. If the file already exists, merge the `codebuddy` entry; otherwise copy `examples/herdr-app-programs.json`.
+
+```json
+{
+  "programs": {
+    "codebuddy": {
+      "name": "CodeBuddy",
+      "icon": "icons/agent.svg",
+      "run": ["codebuddy"],
+      "match": ["codebuddy"],
+      "tint": true,
+      "tile": "#1c1d21",
+      "color": "#ffffff"
+    }
+  }
+}
+```
+
+- `run` adds CodeBuddy to the menu.
+- `match` maps the plugin's OSC `app=codebuddy` report to the same entry, so the sidebar uses this name and icon.
+- `icon` points at the app's installed `icons/agent.svg`. Replace it with your own `icons/codebuddy.svg` if you have one.
+
+The command must be on the login/interactive shell `PATH` of the machine where it will run. Check the remote machine with:
+
+```bash
+zsh -lic 'command -v codebuddy'
+```
+
+The app watches `programs.json` and reloads it on change. If the entry still does not appear, check `programs.error` in `~/.config/herdr-app` for invalid JSON.
+
+The built-in list lives in `defaults/programs.json` in [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app). Adding CodeBuddy there is a one-entry upstream change; the local file works today.
+
 ## State mapping
 
 | CodeBuddy event | Herdr state | Notes |
@@ -172,6 +208,7 @@ Layout:
 │   ├── scripts/notify.sh
 │   └── package.json
 ├── test/                  node:test suite
+├── examples/              Herdr app programs.json example
 ├── README.md
 ├── README.zh-CN.md
 └── LICENSE

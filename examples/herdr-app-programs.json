@@ -1,0 +1,17 @@
+{
+  "programs": {
+    "codebuddy": {
+      "name": "CodeBuddy",
+      "icon": "icons/agent.svg",
+      "run": [
+        "codebuddy"
+      ],
+      "match": [
+        "codebuddy"
+      ],
+      "tint": true,
+      "tile": "#1c1d21",
+      "color": "#ffffff"
+    }
+  }
+}

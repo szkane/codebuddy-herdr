@@ -82,6 +82,42 @@ hc machine add <host>
 
 普通终端会忽略这些转义序列。不会报错，只是没有状态显示。
 
+### 从 Herdr App 菜单启动 CodeBuddy
+
+App 右上角的 **Start an agent** 菜单只列出 `programs.json` 中带 `run` 的条目。CodeBuddy 不在内置表里，所以默认不会出现。
+
+在运行 Herdr App 的机器（你的 Mac）上编辑 `~/.config/herdr-app/programs.json`。文件已存在就合并 `codebuddy` 这一项，不存在就直接复制 `examples/herdr-app-programs.json`。
+
+```json
+{
+  "programs": {
+    "codebuddy": {
+      "name": "CodeBuddy",
+      "icon": "icons/agent.svg",
+      "run": ["codebuddy"],
+      "match": ["codebuddy"],
+      "tint": true,
+      "tile": "#1c1d21",
+      "color": "#ffffff"
+    }
+  }
+}
+```
+
+- `run` 让 CodeBuddy 出现在菜单里。
+- `match` 把插件上报的 OSC `app=codebuddy` 映射到同一条目，侧边栏会显示这里的名字和图标。
+- `icon` 使用 App 自带的 `icons/agent.svg`；有自己的 `icons/codebuddy.svg` 也可以替换。
+
+`codebuddy` 必须在实际运行它的机器的登录/交互 shell `PATH` 中。检查远程机器：
+
+```bash
+zsh -lic 'command -v codebuddy'
+```
+
+App 会监听 `programs.json` 并在变更后重载。如果仍不出现，检查 `~/.config/herdr-app/programs.error` 是否有 JSON 错误。
+
+内置表在 [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app) 的 `defaults/programs.json`；给上游加一条就能内置，本地文件现在就能用。
+
 ## 状态映射
 
 | CodeBuddy 事件 | Herdr 状态 | 说明 |
@@ -172,6 +208,7 @@ codebuddy plugin validate ./herdr-notify
 │   ├── scripts/notify.sh
 │   └── package.json
 ├── test/                  node:test 测试
+├── examples/              Herdr app programs.json 示例
 ├── README.md
 ├── README.zh-CN.md
 └── LICENSE
