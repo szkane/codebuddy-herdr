@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Make [CodeBuddy Code](https://www.codebuddy.ai/) a first-class agent in [Herdr](https://herdr.dev/): live `working`, `blocked`, `done` and `error` states in the sidebar, plus notifications when a turn finishes or needs you.
+Make [CodeBuddy Code](https://www.codebuddy.ai/) a first-class agent in [Herdr](https://herdr.dev/): live `working`, `blocked` and `done` states in the sidebar, plus notifications when a turn finishes or needs you.
 
 [中文文档](README.zh-CN.md)
 
@@ -19,12 +19,12 @@ The OSC path matters for remote work: terminal escape sequences travel with the 
 
 ## Features
 
-- Reports `working` while a turn runs, `blocked` while CodeBuddy waits for permission or an answer, `done` when the turn ends, and `error` when it fails.
+- Reports `working` while a turn runs, `blocked` while CodeBuddy waits for permission or an answer, and `blocked` when a turn fails.
 - Works with the Herdr app over SSH, and with remote machines managed by `herdr machine add`.
 - Uses the Herdr TUI socket API when running inside the TUI, including native session resume.
 - No daemon, no runtime dependencies, no network calls.
 - Hooks always exit 0. A reporting failure can never block an agent turn.
-- Keeps shell commands and URLs out of the status message.
+- Keeps prompts, shell commands, URLs and MCP text out of the status message.
 
 ## Requirements
 
@@ -172,7 +172,7 @@ The template uses `ready: report`, so the task is sent only after this plugin re
 | CodeBuddy event | Herdr state | Notes |
 | --- | --- | --- |
 | `SessionStart` (startup / resume) | `idle` | A late startup event does not cancel a running turn |
-| `UserPromptSubmit` | `working` | Message is the first line of the prompt |
+| `UserPromptSubmit` | `working` | Prompt text is never copied |
 | `PreToolUse` | `working` | `AskUserQuestion` becomes `blocked/question`; `ExitPlanMode` becomes `blocked/permission` |
 | `Notification` (`permission_prompt`) | `blocked/permission` | The reliable "waiting for a person" signal |
 | `PostToolUse` / `PostToolUseFailure` | `working` | Only when the previous state was `blocked` |
@@ -183,7 +183,7 @@ The template uses `ready: report`, so the task is sent only after this plugin re
 | `SubagentStart` | `working` | A subagent is running |
 | `Stop` | `done` | The turn completed |
 | `StopFailure` | `blocked` | A failed turn needs you; the app has no `error` visual |
-| `SessionEnd` | `clear` | `/clear` maps to `idle` |
+| `SessionEnd` | `clear` | Includes `/clear`; clears the TUI resume command |
 
 ## Design notes
 
@@ -192,7 +192,7 @@ The template uses `ready: report`, so the task is sent only after this plugin re
 - **`PermissionRequest` is not used.** It also fires for tools that are auto-approved, so it cannot distinguish "waiting for a person" from "about to run". `Notification(permission_prompt)` is the reliable signal.
 - **`done` survives.** Per the OSC 7501 specification, `done` and `error` persist until they are replaced or cleared. A late `idle_prompt` only resets a pane that is still `working`, which recovers interrupted turns.
 - **Native resume (TUI).** Each CLI report includes `--agent-session-id <session> -- codebuddy --resume <session>`, so a Herdr TUI server restart reopens the same conversation. The Herdr app's `hc` 0.1.x has no public session-reporting API, so app-side resume needs upstream support.
-- **Monotonic `seq`.** Herdr drops reports whose sequence is not strictly increasing. The plugin keeps a per-session counter under the system temp directory.
+- **Monotonic `seq`.** Herdr drops reports whose sequence is not strictly increasing. A per-session lock and a counter seeded from the current time keep it monotonic across parallel hooks.
 
 ## Configuration
 
@@ -200,10 +200,19 @@ The template uses `ready: report`, so the task is sent only after this plugin re
 | --- | --- | --- |
 | `HERDR_NOTIFY_DEBUG` | unset | Append JSON debug lines to this file |
 | `HERDR_NOTIFY_NODE` | auto-detected | Node binary used by `scripts/notify.sh` |
-| `HERDR_NOTIFY_TTY` | `/dev/tty` | Terminal device for OSC output (tests and debugging) |
+| `HERDR_NOTIFY_TTY` | `/dev/tty` | Test/debug only; a character device or a file under the system temp directory |
 | `HERDR_ENV` | set by Herdr | `1` inside a Herdr pane |
 | `HERDR_BIN_PATH` | set by Herdr | Herdr binary that owns the pane |
 | `HERDR_PANE_ID` | set by Herdr | Pane address used by `report-agent` |
+
+## Security notes
+
+- Status messages never include prompt text, MCP text, shell commands, URLs or secrets. Only tool names and file paths are copied.
+- State lives in a user-owned directory (`$XDG_RUNTIME_DIR/herdr-notify` or `$TMPDIR/herdr-notify-<uid>`) with mode 0700; state files are 0600, written atomically, and protected by a per-session lock.
+- OSC output is limited to a character device (normally `/dev/tty`) or a file under the system temp directory. Symlinks and FIFOs are refused, and the device is opened with `O_NOFOLLOW`.
+- Hook stdin is capped at 1 MiB. Oversized input falls back to extracting only the event, session and tool name.
+- The plugin never invokes a shell. The only child process is the Herdr binary from `HERDR_BIN_PATH`, which must be named `herdr` and be executable.
+- Hooks exit 0 on every path, including unexpected exceptions.
 
 ## Troubleshooting
 
@@ -234,6 +243,7 @@ The template uses `ready: report`, so the task is sent only after this plugin re
 - `tmux` blocks the sequence. Run CodeBuddy directly in a Herdr pane.
 - `StopFailure` is reported as `blocked` with the message `turn failed`; the app has no separate `error` visual.
 - `done` records persist until the next report or `clear`, by design.
+- The TUI reports `done` as `idle`; Herdr infers "done" from the working to idle transition. The TUI path does not send `kind`; the app path does.
 - Hooks always exit 0. Delivery failures are written to the debug log only.
 
 ## Upstream parity

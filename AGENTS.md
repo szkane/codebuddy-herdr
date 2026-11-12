@@ -24,7 +24,7 @@ Hooks -> `herdr-notify/index.js` -> state mapping -> one of two transports:
 
 `scripts/notify.sh` locates Node and execs `index.js`. `index.js` has no dependencies and no build step.
 
-Per-session state lives in `$TMPDIR/herdr-notify/<session>.json` (monotonic seq + last state).
+Per-session state lives in `$XDG_RUNTIME_DIR/herdr-notify` or `$TMPDIR/herdr-notify-<uid>` (hashed key, monotonic seq + last state).
 
 ## Invariants (do not break)
 
@@ -37,9 +37,12 @@ Per-session state lives in `$TMPDIR/herdr-notify/<session>.json` (monotonic seq 
   - `Elicitation` for MCP input
 - `StopFailure` maps to `blocked`, not OSC `error`. The app only renders working/blocked/done/idle.
 - `done`/`error` records survive; a late `idle_prompt` may reset only a previous `working`.
-- `seq` must strictly increase per session. Keep the `Date.now()*1000 + pid` / `previous+1` scheme.
+- `seq` must strictly increase per session. Use a per-session lock and `Math.max(Date.now(), previous+1)`; do not rely on a bare timestamp.
 - TUI resume only on `report-agent`: `--agent-session-id <id> -- codebuddy --resume <id>`. Omit for unsafe ids and for `release-agent`.
-- Status messages must not contain shell commands, URLs, or secrets. Use tool name + file path.
+- Status messages must not contain prompt text, MCP text, shell commands, URLs, or secrets. Use tool name + file path.
+- OSC output is limited to `/dev/tty` or a file under the system temp directory. Refuse symlinks and FIFOs; open with `O_NOFOLLOW`.
+- State must be written to a user-owned 0700 directory, with 0600 atomic writes and a per-session lock.
+- Hook stdin is capped at 1 MiB; oversized input may only recover event, session and tool name.
 - No daemon, no network calls, no runtime dependencies.
 
 ## Testing
@@ -57,7 +60,8 @@ Test rules:
 - Every behavior change needs a case in `test/notify.test.js`.
 - Tests must set `TMPDIR`, `HERDR_NOTIFY_TTY` and `HERDR_NOTIFY_DEBUG` to a temp dir, and clear `HERDR_ENV` / `HERDR_BIN_PATH` / `HERDR_PANE_ID`.
 - Mock `herdr` / `hc` with small shell scripts; never require a real Herdr for tests.
-- `--dry-run` prints the OSC payload and must not deliver or write state.
+- `--dry-run` prints a JSON envelope containing the OSC payload and must not deliver or write state.
+- Security regressions must stay covered: symlinked tty, FIFO tty, symlinked state dir, oversized input, and parallel hooks with unique seq.
 
 Marketplace smoke test (isolated, does not touch the real config):
 

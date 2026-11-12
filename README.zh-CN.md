@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-让 [CodeBuddy Code](https://www.codebuddy.ai/) 在 [Herdr](https://herdr.dev/) 中显示实时的 `working`、`blocked`、`done`、`error` 状态，并在任务完成或需要你确认时收到提醒。
+让 [CodeBuddy Code](https://www.codebuddy.ai/) 在 [Herdr](https://herdr.dev/) 中显示实时的 `working`、`blocked`、`done` 状态，并在任务完成或需要你确认时收到提醒。
 
 [English](README.md)
 
@@ -19,12 +19,12 @@ OSC 通道对远程开发尤其重要：转义序列随 pty 字节流一起传�
 
 ## 特性
 
-- 一轮进行中显示 `working`，等待授权或回答时显示 `blocked`，一轮结束显示 `done`，失败显示 `error`。
+- 一轮进行中显示 `working`，等待授权或回答时显示 `blocked`，一轮结束显示 `done`，失败的一轮显示 `blocked`。
 - 支持 Herdr App 跨 SSH 使用，也支持 `herdr machine add` 管理的远程机器。
 - 在 Herdr TUI 中自动改用 socket API，并支持 native session resume。
 - 无守护进程、无运行时依赖、无网络请求。
 - Hook 永远以 0 退出，上报失败不会阻塞 CodeBuddy。
-- 状态消息不会带出 shell 命令和 URL。
+- 状态消息不会带出提示词、MCP 文本、shell 命令、URL 和密钥。
 
 ## 环境要求
 
@@ -172,7 +172,7 @@ hc run codebuddy "fix the failing test"
 | CodeBuddy 事件 | Herdr 状态 | 说明 |
 | --- | --- | --- |
 | `SessionStart`（startup / resume） | `idle` | 迟到的 startup 不会打断进行中的一轮 |
-| `UserPromptSubmit` | `working` | 消息为提示词首行 |
+| `UserPromptSubmit` | `working` | 不复制提示词文本 |
 | `PreToolUse` | `working` | `AskUserQuestion` 映射为 `blocked/question`；`ExitPlanMode` 映射为 `blocked/permission` |
 | `Notification`（`permission_prompt`） | `blocked/permission` | 可靠的"正在等人"信号 |
 | `PostToolUse` / `PostToolUseFailure` | `working` | 仅当上一状态是 `blocked` |
@@ -183,7 +183,7 @@ hc run codebuddy "fix the failing test"
 | `SubagentStart` | `working` | 子代理运行中 |
 | `Stop` | `done` | 一轮完成 |
 | `StopFailure` | `blocked` | 失败的一轮需要你处理；App 没有 `error` 视觉 |
-| `SessionEnd` | `clear` | `/clear` 映射为 `idle` |
+| `SessionEnd` | `clear` | 包含 `/clear`；同时清除 TUI resume 命令 |
 
 ## 设计说明
 
@@ -192,7 +192,7 @@ hc run codebuddy "fix the failing test"
 - **不使用 `PermissionRequest`。** 它对自动放行的工具也会触发，无法区分"正在等人"和"马上执行"。`Notification(permission_prompt)` 才是可靠信号。
 - **`done` 会保留。** 按 OSC 7501 规范，`done` 和 `error` 会保留到被替换或清除。迟到的 `idle_prompt` 只会重置仍处于 `working` 的 pane，用来恢复被中断的一轮。
 - **Native resume（TUI）。** 每次 CLI 上报都会带 `--agent-session-id <session> -- codebuddy --resume <session>`，Herdr TUI 服务重启后会恢复同一个会话。Herdr App 的 `hc` 0.1.x 没有公开的 session 上报 API，App 端 resume 需要上游支持。
-- **`seq` 单调递增。** Herdr 会丢弃序号没有严格变大的上报；插件在系统临时目录中为每个会话维护计数器。
+- **`seq` 单调递增。** Herdr 会丢弃序号没有严格变大的上报；每会话锁加当前时间种子，保证并发 Hook 下仍然单调。
 
 ## 配置
 
@@ -200,10 +200,19 @@ hc run codebuddy "fix the failing test"
 | --- | --- | --- |
 | `HERDR_NOTIFY_DEBUG` | 未设置 | 把 JSON 调试日志追加到指定文件 |
 | `HERDR_NOTIFY_NODE` | 自动探测 | `scripts/notify.sh` 使用的 Node 二进制 |
-| `HERDR_NOTIFY_TTY` | `/dev/tty` | OSC 输出设备，用于测试和调试 |
+| `HERDR_NOTIFY_TTY` | `/dev/tty` | 仅测试/调试；必须是字符设备或系统临时目录下的文件 |
 | `HERDR_ENV` | Herdr 注入 | 位于 Herdr pane 内时为 `1` |
 | `HERDR_BIN_PATH` | Herdr 注入 | 拥有该 pane 的 Herdr 二进制 |
 | `HERDR_PANE_ID` | Herdr 注入 | `report-agent` 使用的 pane 地址 |
+
+## 安全说明
+
+- 状态消息不包含提示词、MCP 文本、shell 命令、URL 或密钥，只复制工具名和文件路径。
+- 状态存放在用户自有目录（`$XDG_RUNTIME_DIR/herdr-notify` 或 `$TMPDIR/herdr-notify-<uid>`），权限 0700；状态文件 0600，原子写入，并用每会话锁保护。
+- OSC 输出只允许字符设备（通常是 `/dev/tty`）或系统临时目录下的文件；拒绝符号链接和 FIFO，并使用 `O_NOFOLLOW` 打开。
+- Hook stdin 上限为 1 MiB；超限时只回退提取事件、会话和工具名。
+- 插件不调用 shell。唯一的子进程是 `HERDR_BIN_PATH` 指向的 Herdr 二进制，且必须名为 `herdr` 并具有执行权限。
+- 所有路径都以 0 退出，包括未预期的异常。
 
 ## 故障排查
 
@@ -234,6 +243,7 @@ hc run codebuddy "fix the failing test"
 - `tmux` 会拦截该序列，请在 Herdr pane 中直接运行 CodeBuddy。
 - `StopFailure` 会显示为 `blocked` 加消息 `turn failed`；App 没有单独的 `error` 视觉。
 - `done` 记录会保留到下一次上报或 `clear`，这是协议设计。
+- TUI 把 `done` 上报为 `idle`，由 Herdr 根据 working → idle 推断；TUI 路径不发送 `kind`，App 路径发送。
 - Hook 永远以 0 退出，发送失败只写调试日志。
 
 ## 上游才能补齐的部分
