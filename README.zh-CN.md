@@ -6,6 +6,8 @@
 
 [English](README.md)
 
+![CodeBuddy 在 Herdr 中显示 working、blocked、done 状态](Screenshot.png)
+
 ## 它解决什么问题
 
 CodeBuddy Code 不会把自己的运行状态告诉 Herdr。这个插件把 CodeBuddy 的生命周期 Hook 接到 Herdr 真正读取的两条通道上：
@@ -282,6 +284,7 @@ codebuddy plugin validate ./herdr-notify   # 插件清单
 │   └── package.json
 ├── test/                  node:test 测试
 ├── examples/              App programs.json + Core 模板
+├── Screenshot.png         README 截图
 ├── AGENTS.md              编码代理的项目约定
 ├── CHANGELOG.md
 ├── README.md

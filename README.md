@@ -6,6 +6,8 @@ Make [CodeBuddy Code](https://www.codebuddy.ai/) a first-class agent in [Herdr](
 
 [中文文档](README.zh-CN.md)
 
+![CodeBuddy reporting working, blocked and done in Herdr](Screenshot.png)
+
 ## What it does
 
 CodeBuddy Code does not report its state to Herdr. This plugin wires CodeBuddy's lifecycle hooks to the transports Herdr actually reads:
@@ -282,6 +284,7 @@ Layout:
 │   └── package.json
 ├── test/                  node:test suite
 ├── examples/              App programs.json + core template
+├── Screenshot.png         README screenshot
 ├── AGENTS.md              Instructions for coding agents
 ├── CHANGELOG.md
 ├── README.md
