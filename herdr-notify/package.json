@@ -1,0 +1,32 @@
+{
+  "name": "herdr-notify",
+  "version": "0.1.0",
+  "description": "Report CodeBuddy Code session state to the Herdr app (OSC 7501) and Herdr TUI (pane report-agent).",
+  "license": "MIT",
+  "author": {
+    "name": "szkane",
+    "url": "https://github.com/szkane"
+  },
+  "homepage": "https://github.com/szkane/codebuddy-herdr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/szkane/codebuddy-herdr.git",
+    "directory": "herdr-notify"
+  },
+  "bugs": {
+    "url": "https://github.com/szkane/codebuddy-herdr/issues"
+  },
+  "keywords": [
+    "codebuddy",
+    "herdr",
+    "osc-7501",
+    "agent-status",
+    "terminal"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "herdr-notify": "index.js"
+  }
+}
